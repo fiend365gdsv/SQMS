@@ -20,8 +20,10 @@ public class QueueService {
     private final PatientRepository patientRepo;
     private final QueueStreamPublisher stream;
 
-    public QueueService(TokenRepository tokenRepo, DoctorRepository doctorRepo,
-                        PatientRepository patientRepo, QueueStreamPublisher stream) {
+    public QueueService(TokenRepository tokenRepo,
+                        DoctorRepository doctorRepo,
+                        PatientRepository patientRepo,
+                        QueueStreamPublisher stream) {
         this.tokenRepo = tokenRepo;
         this.doctorRepo = doctorRepo;
         this.patientRepo = patientRepo;
@@ -32,10 +34,21 @@ public class QueueService {
         return LocalDate.now().atStartOfDay();
     }
 
+    private void sendSms(String phone, String message) {
+        // Replace with real SMS integration
+        System.out.println("Sending SMS to " + phone + ": " + message);
+    }
+
     @Transactional
     public Token enqueue(Long doctorId, Long patientId) {
-        Doctor doctor = doctorRepo.findById(doctorId).orElseThrow();
-        Patient patient = patientRepo.findById(patientId).orElseThrow();
+        Doctor doctor = doctorRepo.findById(doctorId).orElseThrow(() ->
+                new IllegalArgumentException("Doctor not found"));
+        if (!doctor.isAvailable()) {
+            throw new IllegalStateException("Doctor not available");
+        }
+
+        Patient patient = patientRepo.findById(patientId).orElseThrow(() ->
+                new IllegalArgumentException("Patient not found"));
 
         Long nextOrder = tokenRepo.findMaxQueueOrder(doctor) + 1;
         Integer nextTokenNum = tokenRepo.findMaxTokenNumberForDay(doctor, startOfToday()) + 1;
@@ -50,7 +63,11 @@ public class QueueService {
         token.setServiceDay(startOfToday());
 
         Token saved = tokenRepo.save(token);
+
+        // Notify patient
+        sendSms(patient.getContact(), "Token generated: " + token.getTokenNumber());
         stream.pushDoctorUpdate(doctorId);
+
         return saved;
     }
 
@@ -59,10 +76,15 @@ public class QueueService {
         Doctor doctor = doctorRepo.findById(doctorId).orElseThrow();
         Token next = tokenRepo.findFirstByDoctorAndStatusOrderByQueueOrderAsc(doctor, TokenStatus.WAITING)
                 .orElseThrow(() -> new IllegalStateException("No waiting patients"));
+
         next.setStatus(TokenStatus.CALLED);
         next.setCalledAt(LocalDateTime.now());
         Token saved = tokenRepo.save(next);
+
+        // Notify patient
+        sendSms(next.getPatient().getContact(), "It's your turn! Token: " + next.getTokenNumber());
         stream.pushDoctorUpdate(doctorId);
+
         return saved;
     }
 
@@ -112,5 +134,17 @@ public class QueueService {
                 .limit(30)
                 .average()
                 .orElse(180);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Token> pendingTokens(Long doctorId) {
+        Doctor doctor = doctorRepo.findById(doctorId).orElseThrow();
+        return tokenRepo.findWaitingByDoctor(doctor);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Token> completedTokens(Long doctorId) {
+        Doctor doctor = doctorRepo.findById(doctorId).orElseThrow();
+        return tokenRepo.findServedToday(doctor, startOfToday());
     }
 }
