@@ -9,30 +9,62 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class QueueStreamPublisher {
+
+    // Map of doctorId -> list of active emitters
     private final Map<Long, List<SseEmitter>> emittersByDoctor = new ConcurrentHashMap<>();
 
+    /**
+     * Subscribe to SSE updates for a doctor.
+     * @param doctorId doctor's ID
+     * @return SseEmitter to receive events
+     */
     public SseEmitter subscribe(Long doctorId) {
         SseEmitter emitter = new SseEmitter(0L); // no timeout
-        emittersByDoctor.computeIfAbsent(doctorId, k -> new ArrayList<>()).add(emitter);
-        emitter.onCompletion(() -> remove(doctorId, emitter));
-        emitter.onTimeout(() -> remove(doctorId, emitter));
+
+        // Add emitter in a thread-safe way
+        emittersByDoctor.compute(doctorId, (k, v) -> {
+            if (v == null) v = new ArrayList<>();
+            v.add(emitter);
+            return v;
+        });
+
+        // Remove emitter on completion or timeout
+        emitter.onCompletion(() -> removeEmitter(doctorId, emitter));
+        emitter.onTimeout(() -> removeEmitter(doctorId, emitter));
+
         return emitter;
     }
 
+    /**
+     * Push an update to all active emitters for a doctor.
+     * @param doctorId doctor's ID
+     */
     public void pushDoctorUpdate(Long doctorId) {
-        var list = emittersByDoctor.getOrDefault(doctorId, List.of());
-        List<SseEmitter> dead = new ArrayList<>();
-        for (SseEmitter e : list) {
+        List<SseEmitter> emitters = emittersByDoctor.getOrDefault(doctorId, new ArrayList<>());
+
+        // Make a mutable copy for safe iteration
+        List<SseEmitter> deadEmitters = new ArrayList<>();
+        for (SseEmitter e : new ArrayList<>(emitters)) {
             try {
                 e.send(SseEmitter.event().name("queue-update").data("updated"));
             } catch (IOException ex) {
-                dead.add(e);
+                deadEmitters.add(e);
             }
         }
-        list.removeAll(dead);
+
+        // Remove dead emitters safely
+        if (!deadEmitters.isEmpty()) {
+            emitters.removeAll(deadEmitters);
+        }
     }
 
-    private void remove(Long doctorId, SseEmitter e) {
-        emittersByDoctor.computeIfPresent(doctorId, (k, v) -> { v.remove(e); return v; });
+    /**
+     * Remove a single emitter from a doctor's list.
+     */
+    private void removeEmitter(Long doctorId, SseEmitter emitter) {
+        emittersByDoctor.computeIfPresent(doctorId, (k, list) -> {
+            list.remove(emitter);
+            return list.isEmpty() ? null : list; // remove key if list empty
+        });
     }
 }

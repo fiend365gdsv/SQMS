@@ -14,7 +14,10 @@ public class DoctorController {
     public DoctorController(DoctorRepository doctorRepo) {
         this.doctorRepo = doctorRepo;
     }
-
+    @PostMapping
+    public Doctor createDoctor(@RequestBody Doctor doctor) {
+        return doctorRepo.save(doctor);
+    }
     @PostMapping("/{id}/availability")
     public Doctor updateAvailability(@PathVariable Long id, @RequestParam boolean available) {
         Doctor doctor = doctorRepo.findById(id).orElseThrow(() ->
